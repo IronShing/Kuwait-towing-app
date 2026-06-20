@@ -1,0 +1,22 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Firebase / secrets — never commit credentials
+google-services.json
+GoogleService-Info.plist
+.env
+
+# OS
+.DS_Store
+Thumbs.db
