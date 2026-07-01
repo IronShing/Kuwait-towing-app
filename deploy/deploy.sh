@@ -9,7 +9,7 @@ APPDIR="/home/tryfz3a.com/app"
 OWNER="tryfz9546"
 
 echo "==> Building Flutter web"
-flutter build web --release
+flutter build web --release --pwa-strategy=none
 
 echo "==> Uploading web app (Flutter build) -> $DOCROOT"
 rsync -az --delete \
