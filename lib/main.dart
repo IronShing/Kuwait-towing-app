@@ -101,7 +101,8 @@ class Api {
     if (token == null) return false;
     try {
       final res = await http
-          .get(Uri.parse('$base/auth/me'), headers: _headers);
+          .get(Uri.parse('$base/auth/me'), headers: _headers)
+          .timeout(const Duration(seconds: 4));
       if (res.statusCode != 200) return false;
       user = (jsonDecode(res.body) as Map<String, dynamic>)['user'];
       return true;
@@ -498,13 +499,15 @@ class _FzaShellState extends State<FzaShell> {
   }
 
   Future<void> _boot() async {
-    final results = await Future.wait([
-      Api.restore(),
-      Future.delayed(const Duration(milliseconds: 2200), () => false),
-    ]);
+    bool authed = false;
+    try {
+      authed = await Api.restore()
+          .timeout(const Duration(seconds: 4), onTimeout: () => false);
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 1500));
     if (mounted) {
       setState(() {
-        _authed = results[0];
+        _authed = authed;
         _booted = true;
       });
     }
