@@ -9,6 +9,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() => runApp(const FzaApp());
 
@@ -132,6 +133,43 @@ class Api {
       return d['ride']?['id'] as int?;
     } catch (_) {
       return null;
+    }
+  }
+
+  // Initiate KNET payment. Returns {mode:'knet'|'demo'|'paid', url?}.
+  static Future<Map<String, dynamic>> pay(int rideId) async {
+    try {
+      return await _post('/rides/$rideId/pay', {});
+    } catch (_) {
+      return {'mode': 'demo'};
+    }
+  }
+
+  static Future<void> markPaid(int rideId) async {
+    try {
+      await _post('/rides/$rideId/mark-paid', {});
+    } catch (_) {}
+  }
+
+  static Future<Map<String, dynamic>?> getRide(int rideId) async {
+    try {
+      final res =
+          await http.get(Uri.parse('$base/rides/$rideId'), headers: _headers);
+      if (res.statusCode != 200) return null;
+      return (jsonDecode(res.body) as Map<String, dynamic>)['ride'];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<List<dynamic>> myRides() async {
+    try {
+      final res =
+          await http.get(Uri.parse('$base/rides/mine'), headers: _headers);
+      if (res.statusCode != 200) return [];
+      return (jsonDecode(res.body) as Map<String, dynamic>)['rides'] ?? [];
+    } catch (_) {
+      return [];
     }
   }
 }
@@ -751,14 +789,32 @@ class _BookingFlowState extends State<BookingFlow> {
   double _searchProgress = 0;
   Timer? _searchTimer;
   Timer? _trackTimer;
+  Timer? _pollTimer;
+  Timer? _fallbackTimer;
   LatLng? _driverPos;
   double _driverRemainingKm = 0;
   int _etaMin = 0;
+  int? _rideId;
+  bool _realDriver = false;
+  Map<String, dynamic>? _rideData; // set when a real driver accepts
+
+  String get _drvName =>
+      _rideData?['driverName'] as String? ?? tr('كابتن محمد', 'Captain Mohamad');
+  String get _drvPlate => _rideData?['plate']?.toString() ?? '12345';
+  String get _drvVehicle {
+    final v = _rideData?['vehicleType'] as String?;
+    if (v == 'winch') return tr('ونش', 'Tow Truck');
+    if (v == 'flatbed') return tr('سطحة', 'Flatbed');
+    if (v == 'roadside') return tr('مساعدة', 'Roadside');
+    return tr('تويوتا لاندكروزر', 'Toyota Land Cruiser');
+  }
 
   @override
   void dispose() {
     _searchTimer?.cancel();
     _trackTimer?.cancel();
+    _pollTimer?.cancel();
+    _fallbackTimer?.cancel();
     super.dispose();
   }
 
@@ -840,18 +896,14 @@ class _BookingFlowState extends State<BookingFlow> {
     }
   }
 
-  void _startSearch() {
-    // Persist the ride to the backend (best-effort; demo continues regardless).
-    Api.createRide(
+  Future<void> _startSearch() async {
+    // 1) Create the ride on the backend.
+    final id = await Api.createRide(
       service: _service!.name,
       distanceKm: _fare!["distance"] ?? 0,
       pickup: _pickup == null
           ? null
-          : {
-              'lat': _pickup!.latitude,
-              'lng': _pickup!.longitude,
-              'label': _pickupLabel,
-            },
+          : {'lat': _pickup!.latitude, 'lng': _pickup!.longitude, 'label': _pickupLabel},
       dropoff: _destination == null
           ? null
           : {
@@ -860,19 +912,154 @@ class _BookingFlowState extends State<BookingFlow> {
               'label': _destination!.label,
             },
     );
+    _rideId = id;
+
+    // 2) Payment (KNET via gateway, or demo confirm).
+    if (id != null) {
+      final pay = await Api.pay(id);
+      if (pay['mode'] == 'knet' && pay['url'] != null) {
+        final ok = await _confirmDemoKnet(gateway: true);
+        if (!ok) return;
+        try {
+          await launchUrl(Uri.parse(pay['url'] as String),
+              mode: LaunchMode.externalApplication);
+        } catch (_) {}
+      } else if (pay['mode'] != 'paid') {
+        final ok = await _confirmDemoKnet();
+        if (!ok) return;
+        await Api.markPaid(id);
+      }
+    } else {
+      final ok = await _confirmDemoKnet();
+      if (!ok) return;
+    }
+    if (!mounted) return;
+
+    // 3) Search: animate the ring, poll for a real driver, fall back to demo.
     setState(() {
       _stage = Stage.searching;
       _searchProgress = 0;
+      _realDriver = false;
+      _rideData = null;
+      _driverPos = null;
     });
     _searchTimer?.cancel();
     _searchTimer = Timer.periodic(const Duration(milliseconds: 240), (t) {
       if (!mounted) return;
-      setState(() => _searchProgress += 0.06);
-      if (_searchProgress >= 1.0) {
-        t.cancel();
-        setState(() => _stage = Stage.found);
+      setState(() {
+        _searchProgress += 0.06;
+        if (_searchProgress >= 1.0) _searchProgress = 0.05; // loop the ring
+      });
+    });
+    _startPolling();
+    _fallbackTimer?.cancel();
+    _fallbackTimer = Timer(const Duration(seconds: 15), () {
+      if (!mounted || _realDriver) return;
+      _pollTimer?.cancel();
+      _searchTimer?.cancel();
+      setState(() => _stage = Stage.found); // simulated driver demo
+    });
+  }
+
+  // Poll the backend; when a real driver accepts, switch to live tracking.
+  void _startPolling() {
+    if (_rideId == null) return;
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (t) async {
+      final ride = await Api.getRide(_rideId!);
+      if (!mounted || ride == null) return;
+      final status = ride['status'] as String?;
+      if (['accepted', 'enroute', 'arrived', 'completed'].contains(status)) {
+        _realDriver = true;
+        _fallbackTimer?.cancel();
+        _searchTimer?.cancel();
+        _rideData = ride;
+        final loc = ride['driverLoc'];
+        if (loc != null) {
+          _driverPos = LatLng((loc['lat'] as num).toDouble(),
+              (loc['lng'] as num).toDouble());
+          _driverRemainingKm = _pickup == null
+              ? 0
+              : const Distance().as(LengthUnit.Kilometer, _driverPos!, _pickup!);
+          _etaMin = math.max(1, (_driverRemainingKm * 2.6).round());
+        }
+        if (status == 'completed') {
+          t.cancel();
+          setState(() => _stage = Stage.tracking);
+          _arrived();
+          return;
+        }
+        setState(() => _stage = Stage.tracking);
+        _move(_pickup!, 14);
       }
     });
+  }
+
+  // KNET confirmation sheet (demo mode marks paid; gateway mode opens hosted page).
+  Future<bool> _confirmDemoKnet({bool gateway = false}) async {
+    final res = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.all(22),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                    color: const Color(0xFF005EB8),
+                    borderRadius: BorderRadius.circular(6)),
+                child: const Text('KNET',
+                    style: TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.w900)),
+              ),
+              const SizedBox(width: 10),
+              Text(tr('الدفع الآمن', 'Secure payment'),
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            ]),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(tr('المبلغ المستحق', 'Amount due')),
+                Text('${_fare!["total"]!.toStringAsFixed(3)} ${tr('د.ك', 'KWD')}',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w900, fontSize: 20, color: kRedTop)),
+              ],
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF005EB8),
+                minimumSize: const Size(double.infinity, 52),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+              child: Text(
+                  gateway
+                      ? tr('المتابعة إلى KNET', 'Continue to KNET')
+                      : tr('ادفع عبر KNET', 'Pay with KNET'),
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(tr('إلغاء', 'Cancel')),
+            ),
+          ],
+        ),
+      ),
+    );
+    return res ?? false;
   }
 
   void _startTracking() {
@@ -914,9 +1101,9 @@ class _BookingFlowState extends State<BookingFlow> {
           const SizedBox(width: 8),
           Text(tr('وصلت الفزعة', 'Fz3a has arrived')),
         ]),
-        content: Text(tr(
-            'كابتن محمد وصل إلى موقعك. حياك الله!',
-            'Captain Mohamad has reached your location. Welcome!')),
+        content: Text(isAr
+            ? '$_drvName وصل إلى موقعك. حياك الله!'
+            : '$_drvName has reached your location. Welcome!'),
         actions: [
           TextButton(
             onPressed: () {
@@ -933,6 +1120,8 @@ class _BookingFlowState extends State<BookingFlow> {
   void _reset() {
     _searchTimer?.cancel();
     _trackTimer?.cancel();
+    _pollTimer?.cancel();
+    _fallbackTimer?.cancel();
     setState(() {
       _stage = Stage.service;
       _service = null;
@@ -941,6 +1130,9 @@ class _BookingFlowState extends State<BookingFlow> {
       _route = null;
       _fare = null;
       _driverPos = null;
+      _rideId = null;
+      _realDriver = false;
+      _rideData = null;
     });
   }
 
@@ -1001,6 +1193,14 @@ class _BookingFlowState extends State<BookingFlow> {
                 padding: const EdgeInsets.symmetric(horizontal: 22),
                 children: [
                   for (final s in ServiceType.values) _serviceButton(s),
+                  const SizedBox(height: 6),
+                  TextButton.icon(
+                    onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const RideHistoryScreen())),
+                    icon: const Icon(Icons.history, color: Colors.white70, size: 20),
+                    label: Text(tr('رحلاتي السابقة', 'My rides'),
+                        style: const TextStyle(color: Colors.white70)),
+                  ),
                 ],
               ),
             ),
@@ -1174,21 +1374,19 @@ class _BookingFlowState extends State<BookingFlow> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(tr('كابتن محمد', 'Captain Mohamad'),
+                        Text(_drvName,
                             style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold)),
                         const SizedBox(height: 4),
-                        const Text('+965 9XXX XXXX',
-                            style: TextStyle(color: Colors.white70)),
+                        Text(_rideData?['driverPhone']?.toString() ?? '+965 9XXX XXXX',
+                            style: const TextStyle(color: Colors.white70)),
                         const Divider(color: Colors.white24, height: 18),
-                        Text(
-                            tr('المركبة: تويوتا لاندكروزر',
-                                'Vehicle: Toyota Land Cruiser'),
+                        Text('${tr('المركبة', 'Vehicle')}: $_drvVehicle',
                             style: const TextStyle(
                                 color: Colors.white70, fontSize: 12)),
-                        Text(tr('اللوحة: 12345 (الكويت)', 'Plate: 12345 (KUW)'),
+                        Text('${tr('اللوحة', 'Plate')}: $_drvPlate',
                             style: const TextStyle(
                                 color: Colors.white70, fontSize: 12)),
                       ],
@@ -1198,7 +1396,7 @@ class _BookingFlowState extends State<BookingFlow> {
               ),
             ),
             const SizedBox(height: 24),
-            Text(tr('محمد في الطريق إليك', 'Mohamad is on his way'),
+            Text(isAr ? '$_drvName في الطريق إليك' : '$_drvName is on his way',
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                     color: Colors.white,
@@ -1390,7 +1588,7 @@ class _BookingFlowState extends State<BookingFlow> {
                 decoration: BoxDecoration(
                     color: Colors.green.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(6)),
-                child: Text('● ${tr('مباشر', 'Live')} | ${tr('محمد', 'Mohamad')}',
+                child: Text('● ${tr('مباشر', 'Live')} | $_drvName',
                     style: const TextStyle(
                         color: Colors.green, fontWeight: FontWeight.bold)),
               ),
@@ -1432,8 +1630,7 @@ class _BookingFlowState extends State<BookingFlow> {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                tr('كابتن محمد في الطريق إليك',
-                    'Captain Mohamad is on his way'),
+                isAr ? '$_drvName في الطريق إليك' : '$_drvName is on his way',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ),
@@ -1547,6 +1744,97 @@ class _BookingFlowState extends State<BookingFlow> {
       child: Text(label,
           style: const TextStyle(
               color: Colors.white, fontWeight: FontWeight.bold, fontSize: 17)),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rider ride history
+// ---------------------------------------------------------------------------
+class RideHistoryScreen extends StatefulWidget {
+  const RideHistoryScreen({super.key});
+
+  @override
+  State<RideHistoryScreen> createState() => _RideHistoryScreenState();
+}
+
+class _RideHistoryScreenState extends State<RideHistoryScreen> {
+  late Future<List<dynamic>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = Api.myRides();
+  }
+
+  String _svc(String? s) {
+    switch (s) {
+      case 'winch':
+        return tr('ونش', 'Tow Truck');
+      case 'flatbed':
+        return tr('سطحة', 'Flatbed');
+      case 'roadside':
+        return tr('مساعدة', 'Roadside');
+      default:
+        return s ?? '';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: kRedTop,
+        foregroundColor: Colors.white,
+        title: Text(tr('رحلاتي السابقة', 'My rides')),
+      ),
+      body: Container(
+        decoration: _redGradient,
+        child: FutureBuilder<List<dynamic>>(
+          future: _future,
+          builder: (context, snap) {
+            if (!snap.hasData) {
+              return const Center(
+                  child: CircularProgressIndicator(color: Colors.white));
+            }
+            final rides = snap.data!;
+            if (rides.isEmpty) {
+              return Center(
+                child: Text(tr('لا توجد رحلات بعد', 'No rides yet'),
+                    style: const TextStyle(color: Colors.white70)),
+              );
+            }
+            return ListView.builder(
+              padding: const EdgeInsets.all(14),
+              itemCount: rides.length,
+              itemBuilder: (_, i) {
+                final r = rides[i] as Map<String, dynamic>;
+                final paid = r['paymentStatus'] == 'paid';
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  child: ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: kRedTop.withValues(alpha: 0.1),
+                      child: const Icon(Icons.local_shipping, color: kRedTop),
+                    ),
+                    title: Text('${_svc(r['service'] as String?)}  ·  '
+                        '${(r['fareKwd'] as num).toStringAsFixed(3)} ${tr('د.ك', 'KWD')}'),
+                    subtitle: Text([
+                      if (r['pickup']?['label'] != null)
+                        '${tr('من', 'From')}: ${r['pickup']['label']}',
+                      if (r['dropoff']?['label'] != null)
+                        '${tr('إلى', 'To')}: ${r['dropoff']['label']}',
+                      '${tr('الحالة', 'Status')}: ${r['status']}'
+                          '${paid ? ' · ${tr('مدفوع', 'paid')}' : ''}',
+                    ].join('\n')),
+                    isThreeLine: true,
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      ),
     );
   }
 }

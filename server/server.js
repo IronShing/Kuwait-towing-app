@@ -4,6 +4,7 @@
 // rider/driver/admin roles, and ride lifecycle APIs.
 
 const http = require('http');
+const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -107,6 +108,44 @@ function seedAdmin() {
 seedAdmin();
 
 // ---------------------------------------------------------------------------
+// Payments — MyFatoorah (KNET) gateway. Configured via data/config.json
+//   { "myfatoorah": { "token": "<api-token>", "base": "api.myfatoorah.com" } }
+// or env MF_TOKEN / MF_BASE. When no token is set, payments run in demo mode.
+// ---------------------------------------------------------------------------
+const APP_URL = process.env.APP_URL || 'https://tryfz3a.com';
+let MF = { token: process.env.MF_TOKEN || '', base: process.env.MF_BASE || 'apitest.myfatoorah.com' };
+try {
+  const cfg = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8'));
+  if (cfg.myfatoorah) MF = { ...MF, ...cfg.myfatoorah };
+} catch (_) {}
+const paymentsLive = () => !!MF.token;
+
+function mfRequest(pathname, body) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const req = https.request({
+      hostname: MF.base,
+      path: pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + MF.token,
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (r) => {
+      let data = '';
+      r.on('data', (c) => (data += c));
+      r.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Pricing (mirror of the Flutter engine)
 // ---------------------------------------------------------------------------
 function computeFare(km) {
@@ -191,7 +230,7 @@ const server = http.createServer(async (req, res) => {
       if (role === 'driver') {
         user.vehicleType = b.vehicleType || 'winch';
         user.plate = (b.plate || '').trim();
-        user.approved = true; // auto-approve for demo
+        user.approved = false; // admin must verify the driver first
         user.online = false;
       }
       db.users.push(user);
@@ -207,6 +246,24 @@ const server = http.createServer(async (req, res) => {
       if (!user || !verifyPassword(b.password || '', user.passwordHash))
         return send(res, 401, { error: 'Invalid username or password' });
       return send(res, 200, { token: signToken({ uid: user.id }), user: publicUser(user) });
+    }
+
+    // --- payment gateway callback (public; MyFatoorah redirects here) ---
+    if (p === '/payments/callback' && method === 'GET') {
+      const paymentId = url.searchParams.get('paymentId') || url.searchParams.get('Id');
+      let paid = false;
+      if (paymentId && paymentsLive()) {
+        try {
+          const st = await mfRequest('/v2/GetPaymentStatus', { Key: paymentId, KeyType: 'PaymentId' });
+          const d = st?.Data;
+          if (d && d.InvoiceStatus === 'Paid') {
+            const ride = db.rides.find(r => String(r.id) === String(d.CustomerReference));
+            if (ride) { ride.paymentStatus = 'paid'; ride.paymentMethod = 'knet'; saveNow(); paid = true; }
+          }
+        } catch (_) {}
+      }
+      res.writeHead(302, { Location: `${APP_URL}/?paid=${paid ? 1 : 0}` });
+      return res.end();
     }
 
     // --- everything below requires auth ---
@@ -246,6 +303,8 @@ const server = http.createServer(async (req, res) => {
         distanceKm: +km.toFixed(2),
         fareKwd: fare.total, commissionKwd: fare.commission, driverKwd: fare.driver,
         status: 'searching', createdAt: Date.now(),
+        paymentStatus: 'unpaid', paymentMethod: null, paymentRef: null,
+        driverLoc: null,
       };
       db.rides.push(ride);
       saveNow();
@@ -273,6 +332,7 @@ const server = http.createServer(async (req, res) => {
     let m;
     if ((m = p.match(/^\/rides\/(\d+)\/accept$/)) && method === 'POST') {
       if (!me || me.role !== 'driver') return send(res, 403, { error: 'Drivers only' });
+      if (!me.approved) return send(res, 403, { error: 'Your driver account is pending admin approval' });
       const ride = db.rides.find(r => r.id === Number(m[1]));
       if (!ride) return send(res, 404, { error: 'Ride not found' });
       if (ride.status !== 'searching') return send(res, 409, { error: 'Ride already taken' });
@@ -306,18 +366,82 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ride });
     }
 
+    // --- payments: initiate KNET for a ride ---
+    if ((m = p.match(/^\/rides\/(\d+)\/pay$/)) && method === 'POST') {
+      if (!me) return send(res, 401, { error: 'Unauthorized' });
+      const ride = db.rides.find(r => r.id === Number(m[1]));
+      if (!ride || ride.riderId !== me.id) return send(res, 404, { error: 'Ride not found' });
+      if (ride.paymentStatus === 'paid') return send(res, 200, { mode: 'paid' });
+      if (!paymentsLive()) {
+        return send(res, 200, { mode: 'demo' }); // client confirms via /mark-paid
+      }
+      try {
+        const mf = await mfRequest('/v2/SendPayment', {
+          CustomerName: me.name || 'Fz3a Customer',
+          NotificationOption: 'LNK',
+          InvoiceValue: ride.fareKwd,
+          DisplayCurrencyIso: 'KWD',
+          CustomerReference: String(ride.id),
+          CallBackUrl: `${APP_URL}/api/payments/callback`,
+          ErrorUrl: `${APP_URL}/api/payments/callback`,
+        });
+        const url = mf?.Data?.InvoiceURL;
+        if (!url) return send(res, 502, { error: mf?.Message || 'Gateway error' });
+        ride.paymentRef = mf.Data.InvoiceId;
+        save();
+        return send(res, 200, { mode: 'knet', url });
+      } catch (e) {
+        return send(res, 502, { error: 'Payment gateway unreachable' });
+      }
+    }
+
+    // --- payments: demo confirm (used when gateway not configured) ---
+    if ((m = p.match(/^\/rides\/(\d+)\/mark-paid$/)) && method === 'POST') {
+      if (!me) return send(res, 401, { error: 'Unauthorized' });
+      const ride = db.rides.find(r => r.id === Number(m[1]));
+      if (!ride || ride.riderId !== me.id) return send(res, 404, { error: 'Ride not found' });
+      ride.paymentStatus = 'paid';
+      ride.paymentMethod = paymentsLive() ? 'knet' : 'demo';
+      saveNow();
+      return send(res, 200, { ride });
+    }
+
     // --- driver online toggle ---
     if (p === '/driver/online' && method === 'POST') {
       if (!me || me.role !== 'driver') return send(res, 403, { error: 'Drivers only' });
+      if (!me.approved) return send(res, 403, { error: 'Your driver account is pending admin approval' });
       const b = await readBody(req);
       me.online = !!b.online;
       saveNow();
       return send(res, 200, { online: me.online });
     }
 
+    // --- driver posts live location for an active ride ---
+    if ((m = p.match(/^\/rides\/(\d+)\/location$/)) && method === 'POST') {
+      if (!me || me.role !== 'driver') return send(res, 403, { error: 'Drivers only' });
+      const ride = db.rides.find(r => r.id === Number(m[1]));
+      if (!ride || ride.driverId !== me.id) return send(res, 404, { error: 'Ride not found' });
+      const b = await readBody(req);
+      ride.driverLoc = { lat: Number(b.lat), lng: Number(b.lng), at: Date.now() };
+      save();
+      return send(res, 200, { ok: true });
+    }
+
     // --- admin ---
     if (p.startsWith('/admin/')) {
       if (!me || me.role !== 'admin') return send(res, 403, { error: 'Admins only' });
+      if ((m = p.match(/^\/admin\/drivers\/(\d+)\/approve$/)) && method === 'POST') {
+        const drv = db.users.find(u => u.id === Number(m[1]) && u.role === 'driver');
+        if (!drv) return send(res, 404, { error: 'Driver not found' });
+        const b = await readBody(req);
+        drv.approved = b.approved !== false;
+        if (!drv.approved) drv.online = false;
+        saveNow();
+        return send(res, 200, { user: publicUser(drv) });
+      }
+      if (p === '/admin/drivers' && method === 'GET') {
+        return send(res, 200, { drivers: db.users.filter(u => u.role === 'driver').map(publicUser) });
+      }
       if (p === '/admin/stats') {
         return send(res, 200, {
           users: db.users.filter(u => u.role === 'rider').length,

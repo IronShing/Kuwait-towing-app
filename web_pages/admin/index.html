@@ -51,6 +51,7 @@ let me=null, section='overview', refreshTimer=null;
 function api(path,opts={}){
   opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers||{});
   if(token) opts.headers['Authorization']='Bearer '+token;
+  if((opts.method||'GET')!=='GET' && !opts.body) opts.body='{}';
   return fetch(API+path,opts).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});
 }
 const el=id=>document.getElementById(id); const app=()=>el('app');
@@ -131,16 +132,28 @@ function renderStats(d){
   </div></div>`;
 }
 function renderUsers(d){
-  const rows=d.users.map(u=>`<tr>
-    <td>${u.id}</td><td>${u.name}</td><td>${u.username}</td>
-    <td><span class="pill role-${u.role}">${u.role}</span></td>
-    <td>${u.phone||'—'}</td>
-    <td>${u.role==='driver'?((u.vehicleType||'')+' '+(u.plate||'')):'—'}</td>
-    <td>${u.role==='driver'?(u.online?'🟢 online':'⚪ offline'):'—'}</td>
-  </tr>`).join('');
+  const rows=d.users.map(u=>{
+    let approval='—';
+    if(u.role==='driver'){
+      approval = u.approved
+        ? `<span class="pill role-rider">approved</span> <button class="btn-ghost" style="padding:4px 10px" onclick="approveDriver(${u.id},false)">Revoke</button>`
+        : `<span class="pill" style="background:#fef3c7;color:#92400e">pending</span> <button class="btn-ghost" style="padding:4px 10px;background:#16a34a;color:#fff" onclick="approveDriver(${u.id},true)">Approve</button>`;
+    }
+    return `<tr>
+      <td>${u.id}</td><td>${u.name}</td><td>${u.username}</td>
+      <td><span class="pill role-${u.role}">${u.role}</span></td>
+      <td>${u.role==='driver'?((u.vehicleType||'')+' '+(u.plate||'')):'—'}</td>
+      <td>${u.role==='driver'?(u.online?'🟢 online':'⚪ offline'):'—'}</td>
+      <td>${approval}</td>
+    </tr>`;
+  }).join('');
   el('content').innerHTML=`<div class="card"><h2>Users & Drivers</h2><table>
-    <tr><th>ID</th><th>Name</th><th>Username</th><th>Role</th><th>Phone</th><th>Vehicle</th><th>Status</th></tr>
+    <tr><th>ID</th><th>Name</th><th>Username</th><th>Role</th><th>Vehicle</th><th>Online</th><th>Approval</th></tr>
     ${rows}</table></div>`;
+}
+function approveDriver(id,approved){
+  api('/admin/drivers/'+id+'/approve',{method:'POST',body:JSON.stringify({approved})})
+    .then(()=>loadSection('users')).catch(e=>alert(e.message));
 }
 function renderRides(d){
   const rows=d.rides.map(r=>`<tr>
