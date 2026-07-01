@@ -53,4 +53,17 @@ ssh "$SERVER" "
   find $DOCROOT -type f -exec chmod 644 {} \;
 "
 
-echo "==> Done. Remember: add the LiteSpeed /api proxy (see deploy/litespeed-proxy.md) and purge Cloudflare cache."
+echo "==> Purging Cloudflare cache"
+if [ -f deploy/.cf_token ]; then
+  CF=$(cat deploy/.cf_token)
+  ZONE=$(curl -s -H "Authorization: Bearer $CF" \
+    "https://api.cloudflare.com/client/v4/zones?name=tryfz3a.com" \
+    | grep -o '"id":"[a-f0-9]*"' | head -1 | cut -d'"' -f4)
+  curl -s -X POST -H "Authorization: Bearer $CF" -H "Content-Type: application/json" \
+    "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+    --data '{"purge_everything":true}' >/dev/null && echo "cache purged"
+else
+  echo "deploy/.cf_token not found — purge Cloudflare manually."
+fi
+
+echo "==> Done. LiteSpeed /api proxy is already configured (see deploy/litespeed-proxy.md)."
