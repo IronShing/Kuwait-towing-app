@@ -17,6 +17,10 @@ google-services.json
 GoogleService-Info.plist
 .env
 
+# Backend runtime data & secrets (never commit)
+server/data/
+node_modules/
+
 # OS
 .DS_Store
 Thumbs.db

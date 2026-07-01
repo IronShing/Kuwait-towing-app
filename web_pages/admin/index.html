@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>فزعة Fz3a — Admin</title>
+<style>
+  :root { --red-top:#9E1B1E; --red-bot:#470B0D; --sky:#24A7E0; }
+  * { box-sizing:border-box; font-family:-apple-system,"Segoe UI",Tahoma,Arial,sans-serif; }
+  body { margin:0; min-height:100vh; background:linear-gradient(#9E1B1E,#470B0D); color:#fff; }
+  .wrap { max-width:1000px; margin:0 auto; padding:16px; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:8px 0 16px; }
+  .brand { font-size:22px; font-weight:800; } .brand small { opacity:.7; font-weight:400; letter-spacing:2px; }
+  .card { background:#fff; color:#1e293b; border-radius:16px; padding:18px; margin-bottom:14px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+  h2 { margin:0 0 12px; }
+  label { font-size:13px; color:#475569; display:block; margin:10px 0 4px; }
+  input { width:100%; padding:11px 12px; border:1px solid #cbd5e1; border-radius:10px; font-size:15px; }
+  button { cursor:pointer; border:none; border-radius:10px; font-size:15px; font-weight:700; padding:12px 16px; }
+  .btn-primary { background:var(--sky); color:#fff; width:100%; margin-top:14px; }
+  .btn-ghost { background:#e2e8f0; color:#0f172a; padding:8px 12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .stat { background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px; text-align:center; }
+  .stat .n { font-size:28px; font-weight:900; color:#9E1B1E; } .stat .l { color:#64748b; font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { text-align:left; padding:9px 8px; border-bottom:1px solid #eef2f7; }
+  th { color:#64748b; font-size:12px; text-transform:uppercase; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:20px; font-size:12px; font-weight:700; }
+  .role-admin{background:#fef3c7;color:#92400e}.role-driver{background:#dbeafe;color:#1e40af}.role-rider{background:#dcfce7;color:#166534}
+  .err { color:#dc2626; font-size:13px; margin-top:8px; }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; }
+  .modal { background:#fff; color:#1e293b; border-radius:16px; padding:22px; max-width:380px; width:90%; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tab { padding:8px 14px; border-radius:10px; background:rgba(255,255,255,.15); cursor:pointer; }
+  .tab.active { background:#fff; color:#9E1B1E; font-weight:700; }
+  .toplink { color:#fff; opacity:.85; font-size:13px; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">فزعة <small>Fz3a Admin</small></div>
+    <a class="toplink" href="/">← Rider app</a>
+  </header>
+  <div id="app"></div>
+</div>
+<script>
+const API='/api';
+let token = localStorage.getItem('fz3a_admin_token')||'';
+let me=null, section='overview', refreshTimer=null;
+
+function api(path,opts={}){
+  opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers||{});
+  if(token) opts.headers['Authorization']='Bearer '+token;
+  return fetch(API+path,opts).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;});
+}
+const el=id=>document.getElementById(id); const app=()=>el('app');
+
+function loginView(){
+  clearInterval(refreshTimer);
+  app().innerHTML=`<div class="card" style="max-width:400px;margin:40px auto">
+    <h2>Admin sign in</h2>
+    <label>Username</label><input id="u" value="Admin"/>
+    <label>Password</label><input id="p" type="password"/>
+    <button class="btn-primary" onclick="doLogin()">Log in</button>
+    <div class="err" id="err"></div>
+    <div style="margin-top:12px;color:#64748b;font-size:12px">First login: <b>Admin / Admin</b> — you'll be asked to set a new password.</div>
+  </div>`;
+}
+function doLogin(){
+  api('/auth/login',{method:'POST',body:JSON.stringify({username:el('u').value.trim(),password:el('p').value})})
+    .then(d=>{ if(d.user.role!=='admin') throw new Error('Not an admin account.');
+      token=d.token; me=d.user; localStorage.setItem('fz3a_admin_token',token);
+      if(me.mustChangePassword) forcePassword(); else dashboard();
+    }).catch(e=>el('err').textContent=e.message);
+}
+function logout(){ token='';me=null;localStorage.removeItem('fz3a_admin_token');clearInterval(refreshTimer);loginView(); }
+
+function forcePassword(){
+  app().innerHTML += `<div class="modal-bg" id="mbg"><div class="modal">
+    <h2>Set a new password</h2>
+    <p style="color:#64748b;font-size:14px">For security, please replace the default admin password.</p>
+    <label>New password</label><input id="np" type="password"/>
+    <label>Confirm password</label><input id="np2" type="password"/>
+    <button class="btn-primary" onclick="savePassword()">Save & continue</button>
+    <div class="err" id="perr"></div>
+  </div></div>`;
+}
+function savePassword(){
+  const a=el('np').value, b=el('np2').value;
+  if(a.length<4) return el('perr').textContent='At least 4 characters.';
+  if(a!==b) return el('perr').textContent='Passwords do not match.';
+  api('/auth/change-password',{method:'POST',body:JSON.stringify({newPassword:a})})
+    .then(d=>{ me=d.user; dashboard(); }).catch(e=>el('perr').textContent=e.message);
+}
+
+function dashboard(){
+  app().innerHTML=`
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><h2 style="margin:0">Marketplace Console</h2><div style="color:#64748b">Signed in as ${me.username}</div></div>
+        <div><button class="btn-ghost" onclick="loadSection(section)">Refresh</button>
+             <button class="btn-ghost" onclick="logout()">Log out</button></div>
+      </div>
+      <div class="tabs" style="margin-top:12px">
+        <div class="tab" id="t-overview" onclick="loadSection('overview')">Overview</div>
+        <div class="tab" id="t-users" onclick="loadSection('users')">Users & Drivers</div>
+        <div class="tab" id="t-rides" onclick="loadSection('rides')">Rides</div>
+      </div>
+    </div>
+    <div id="content"></div>`;
+  loadSection('overview');
+  clearInterval(refreshTimer); refreshTimer=setInterval(()=>loadSection(section,true),6000);
+}
+
+function loadSection(s,quiet){
+  section=s;
+  ['overview','users','rides'].forEach(x=>{const t=el('t-'+x); if(t) t.classList.toggle('active',x===s);});
+  if(s==='overview') return api('/admin/stats').then(renderStats).catch(err);
+  if(s==='users') return api('/admin/users').then(renderUsers).catch(err);
+  if(s==='rides') return api('/admin/rides').then(renderRides).catch(err);
+  function err(e){ if(String(e.message).includes('Admins')||String(e.message).includes('Unauthorized')) logout(); }
+}
+function renderStats(d){
+  el('content').innerHTML=`<div class="card"><div class="grid">
+    <div class="stat"><div class="n">${d.users}</div><div class="l">Riders</div></div>
+    <div class="stat"><div class="n">${d.drivers}</div><div class="l">Drivers</div></div>
+    <div class="stat"><div class="n">${d.onlineDrivers}</div><div class="l">Online now</div></div>
+    <div class="stat"><div class="n">${d.rides}</div><div class="l">Total rides</div></div>
+    <div class="stat"><div class="n">${d.activeRides}</div><div class="l">Active rides</div></div>
+    <div class="stat"><div class="n">${d.revenue}</div><div class="l">Commission (KWD)</div></div>
+  </div></div>`;
+}
+function renderUsers(d){
+  const rows=d.users.map(u=>`<tr>
+    <td>${u.id}</td><td>${u.name}</td><td>${u.username}</td>
+    <td><span class="pill role-${u.role}">${u.role}</span></td>
+    <td>${u.phone||'—'}</td>
+    <td>${u.role==='driver'?((u.vehicleType||'')+' '+(u.plate||'')):'—'}</td>
+    <td>${u.role==='driver'?(u.online?'🟢 online':'⚪ offline'):'—'}</td>
+  </tr>`).join('');
+  el('content').innerHTML=`<div class="card"><h2>Users & Drivers</h2><table>
+    <tr><th>ID</th><th>Name</th><th>Username</th><th>Role</th><th>Phone</th><th>Vehicle</th><th>Status</th></tr>
+    ${rows}</table></div>`;
+}
+function renderRides(d){
+  const rows=d.rides.map(r=>`<tr>
+    <td>${r.id}</td><td>${r.service}</td><td>${r.riderName||'—'}</td><td>${r.driverName||'—'}</td>
+    <td>${r.distanceKm} km</td><td>${r.fareKwd}</td><td>${r.commissionKwd}</td>
+    <td><span class="pill ${['completed'].includes(r.status)?'role-rider':'role-driver'}">${r.status}</span></td>
+  </tr>`).join('')||'<tr><td colspan="8" style="color:#64748b">No rides yet</td></tr>';
+  el('content').innerHTML=`<div class="card"><h2>Rides</h2><table>
+    <tr><th>ID</th><th>Service</th><th>Rider</th><th>Driver</th><th>Dist</th><th>Fare</th><th>Commission</th><th>Status</th></tr>
+    ${rows}</table></div>`;
+}
+
+// boot
+if(token){ api('/auth/me').then(d=>{ if(d.user.role!=='admin'){logout();return;} me=d.user;
+  if(me.mustChangePassword){loginView();forcePassword();} else dashboard();
+}).catch(()=>logout()); } else loginView();
+</script>
+</body>
+</html>

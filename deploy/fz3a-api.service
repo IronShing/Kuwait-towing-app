@@ -1,0 +1,16 @@
+[Unit]
+Description=Fz3a Towing API (Node.js)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tryfz3a.com/app
+ExecStart=/usr/bin/node /home/tryfz3a.com/app/server.js
+Environment=PORT=3001
+Environment=FZ3A_DATA=/home/tryfz3a.com/app/data
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

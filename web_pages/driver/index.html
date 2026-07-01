@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>فزعة Fz3a — Driver</title>
+<style>
+  :root { --red-top:#9E1B1E; --red-bot:#470B0D; --sky:#24A7E0; --slate:#53697F; }
+  * { box-sizing: border-box; font-family: -apple-system, "Segoe UI", Tahoma, Arial, sans-serif; }
+  body { margin:0; min-height:100vh; background:linear-gradient(#9E1B1E,#470B0D); color:#fff; }
+  .wrap { max-width:720px; margin:0 auto; padding:16px; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:8px 0 16px; }
+  .brand { font-size:22px; font-weight:800; }
+  .brand small { opacity:.7; font-weight:400; letter-spacing:2px; }
+  .card { background:#fff; color:#1e293b; border-radius:16px; padding:18px; margin-bottom:14px;
+          box-shadow:0 8px 24px rgba(0,0,0,.25); }
+  h2 { margin:0 0 12px; }
+  label { font-size:13px; color:#475569; display:block; margin:10px 0 4px; }
+  input, select { width:100%; padding:11px 12px; border:1px solid #cbd5e1; border-radius:10px; font-size:15px; }
+  button { cursor:pointer; border:none; border-radius:10px; font-size:15px; font-weight:700; padding:12px 16px; }
+  .btn-primary { background:var(--sky); color:#fff; width:100%; margin-top:14px; }
+  .btn-dark { background:#0f172a; color:#fff; }
+  .btn-green { background:#16a34a; color:#fff; }
+  .btn-ghost { background:#e2e8f0; color:#0f172a; }
+  .row { display:flex; gap:10px; align-items:center; }
+  .muted { color:#64748b; font-size:13px; }
+  .pill { display:inline-block; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:700; }
+  .on { background:#dcfce7; color:#166534; } .off { background:#fee2e2; color:#991b1b; }
+  .ride { border:1px solid #e2e8f0; border-radius:12px; padding:14px; margin-bottom:10px; }
+  .ride h3 { margin:0 0 6px; font-size:16px; }
+  .payout { color:#16a34a; font-weight:800; font-size:18px; }
+  .tabs { display:flex; gap:8px; margin-bottom:10px; }
+  .tab { flex:1; text-align:center; padding:8px; border-radius:10px; background:rgba(255,255,255,.15); cursor:pointer; }
+  .tab.active { background:#fff; color:#9E1B1E; font-weight:700; }
+  .err { color:#dc2626; font-size:13px; margin-top:8px; }
+  .toplink { color:#fff; opacity:.85; font-size:13px; text-decoration:none; }
+  .switch { display:flex; align-items:center; gap:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">فزعة <small>Fz3a Driver</small></div>
+    <a class="toplink" href="/">← Rider app</a>
+  </header>
+  <div id="app"></div>
+</div>
+
+<script>
+const API = '/api';
+let token = localStorage.getItem('fz3a_driver_token') || '';
+let me = null;
+let poll = null;
+
+function api(path, opts={}) {
+  opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{});
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  return fetch(API+path, opts).then(async r => {
+    const data = await r.json().catch(()=>({}));
+    if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
+    return data;
+  });
+}
+const el = id => document.getElementById(id);
+const app = () => el('app');
+
+// ---------- AUTH ----------
+function authView(mode='login') {
+  clearInterval(poll);
+  app().innerHTML = `
+    <div class="card">
+      <div class="tabs">
+        <div class="tab ${mode==='login'?'active':''}" onclick="authView('login')">Log in</div>
+        <div class="tab ${mode==='signup'?'active':''}" onclick="authView('signup')">Become a driver</div>
+      </div>
+      ${mode==='signup' ? `
+        <label>Full name</label><input id="name" placeholder="Captain Mohamad"/>
+        <label>Phone (+965)</label><input id="phone" placeholder="+965 9XXX XXXX"/>
+        <label>Vehicle type</label>
+        <select id="vtype">
+          <option value="winch">Tow Truck (الونش)</option>
+          <option value="flatbed">Flatbed (السطحة)</option>
+          <option value="roadside">Road Assistance (المساعدة)</option>
+        </select>
+        <label>License plate</label><input id="plate" placeholder="12345"/>
+      ` : ''}
+      <label>Username</label><input id="username" autocomplete="username"/>
+      <label>Password</label><input id="password" type="password" autocomplete="current-password"/>
+      <button class="btn-primary" onclick="doAuth('${mode}')">${mode==='signup'?'Create driver account':'Log in'}</button>
+      <div class="err" id="err"></div>
+    </div>`;
+}
+
+function doAuth(mode) {
+  const body = {
+    username: el('username').value.trim(),
+    password: el('password').value,
+    role: 'driver',
+  };
+  if (mode==='signup') {
+    body.name = el('name').value.trim();
+    body.phone = el('phone').value.trim();
+    body.vehicleType = el('vtype').value;
+    body.plate = el('plate').value.trim();
+  }
+  const path = mode==='signup' ? '/auth/signup' : '/auth/login';
+  api(path, {method:'POST', body: JSON.stringify(body)})
+    .then(d => {
+      if (d.user.role !== 'driver') throw new Error('This is the driver portal. Use a driver account.');
+      token = d.token; me = d.user;
+      localStorage.setItem('fz3a_driver_token', token);
+      dashboard();
+    })
+    .catch(e => el('err').textContent = e.message);
+}
+
+function logout() {
+  token=''; me=null; localStorage.removeItem('fz3a_driver_token');
+  clearInterval(poll); authView('login');
+}
+
+// ---------- DASHBOARD ----------
+function dashboard() {
+  app().innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h2 style="margin:0">حياك، ${me.name}</h2>
+          <div class="muted">${me.username} · ${me.vehicleType||''} ${me.plate?('· '+me.plate):''}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="switch">
+            <span class="pill ${me.online?'on':'off'}" id="statuspill">${me.online?'ONLINE':'OFFLINE'}</span>
+          </div>
+          <button class="btn-ghost" style="margin-top:8px;padding:6px 12px" onclick="toggleOnline()">${me.online?'Go offline':'Go online'}</button>
+        </div>
+      </div>
+      <button class="btn-ghost" style="margin-top:12px;padding:8px 12px" onclick="logout()">Log out</button>
+    </div>
+    <div class="card">
+      <div class="tabs">
+        <div class="tab active" id="tab-av" onclick="switchTab('av')">Available jobs</div>
+        <div class="tab" id="tab-ac" onclick="switchTab('ac')">My active job</div>
+      </div>
+      <div id="list"><div class="muted">Loading…</div></div>
+    </div>`;
+  currentTab = 'av';
+  refresh();
+  clearInterval(poll);
+  poll = setInterval(refresh, 4000);
+}
+
+let currentTab = 'av';
+function switchTab(t){ currentTab=t;
+  el('tab-av').classList.toggle('active', t==='av');
+  el('tab-ac').classList.toggle('active', t==='ac');
+  refresh();
+}
+
+function toggleOnline() {
+  api('/driver/online', {method:'POST', body: JSON.stringify({online: !me.online})})
+    .then(d => { me.online = d.online;
+      el('statuspill').className = 'pill ' + (me.online?'on':'off');
+      el('statuspill').textContent = me.online?'ONLINE':'OFFLINE';
+      dashboard();
+    }).catch(()=>{});
+}
+
+const svcName = s => ({winch:'Tow Truck',flatbed:'Flatbed',roadside:'Road Assistance'}[s]||s);
+
+function refresh() {
+  if (!token) return;
+  const path = currentTab==='av' ? '/rides/available' : '/rides/active';
+  api(path).then(d => {
+    const list = el('list'); if (!list) return;
+    if (!d.rides.length) {
+      list.innerHTML = `<div class="muted">${currentTab==='av'?'No available jobs right now. Stay online — new requests appear here.':'No active job. Accept one from Available jobs.'}</div>`;
+      return;
+    }
+    list.innerHTML = d.rides.map(r => rideCard(r, currentTab)).join('');
+  }).catch(e => { if (String(e.message).includes('Unauthorized')) logout(); });
+}
+
+function rideCard(r, tab) {
+  const pickup = (r.pickup&&r.pickup.label)||'Pickup';
+  const drop = (r.dropoff&&r.dropoff.label)||'—';
+  let actions = '';
+  if (tab==='av') {
+    actions = `<button class="btn-green" onclick="accept(${r.id})">Accept — earn ${r.driverKwd} KWD</button>`;
+  } else {
+    const next = {accepted:['enroute','On my way'],enroute:['arrived','I have arrived'],arrived:['completed','Complete job']}[r.status];
+    actions = next ? `<button class="btn-dark" onclick="setStatus(${r.id},'${next[0]}')">${next[1]}</button>` : `<span class="pill on">${r.status}</span>`;
+  }
+  return `<div class="ride">
+    <div class="row" style="justify-content:space-between">
+      <h3>${svcName(r.service)}</h3>
+      <span class="payout">${r.driverKwd} KWD</span>
+    </div>
+    <div class="muted">Pickup: ${pickup}</div>
+    <div class="muted">Drop-off: ${drop}</div>
+    <div class="muted">Distance: ${r.distanceKm} km · Fare: ${r.fareKwd} KWD · Status: ${r.status}</div>
+    <div style="margin-top:10px">${actions}</div>
+  </div>`;
+}
+
+function accept(id){ api('/rides/'+id+'/accept',{method:'POST'})
+  .then(()=>{ currentTab='ac'; dashboard(); }).catch(e=>alert(e.message)); }
+function setStatus(id,s){ api('/rides/'+id+'/status',{method:'POST',body:JSON.stringify({status:s})})
+  .then(refresh).catch(e=>alert(e.message)); }
+
+// ---------- boot ----------
+if (token) {
+  api('/auth/me').then(d => {
+    if (d.user.role!=='driver'){ logout(); return; }
+    me = d.user; dashboard();
+  }).catch(()=>{ logout(); });
+} else {
+  authView('login');
+}
+</script>
+</body>
+</html>
