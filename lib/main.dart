@@ -555,6 +555,13 @@ class _AuthScreenState extends State<AuthScreen> {
     super.dispose();
   }
 
+  void _openDriverPage() {
+    final uri = kIsWeb
+        ? Uri.base.resolve('driver/')
+        : Uri.parse('https://tryfz3a.com/driver/');
+    launchUrl(uri, webOnlyWindowName: '_self');
+  }
+
   Future<void> _submit() async {
     setState(() {
       _busy = true;
@@ -680,11 +687,18 @@ class _AuthScreenState extends State<AuthScreen> {
                           ],
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      Text(
-                        tr('سائق؟ افتح صفحة السائق /driver',
-                            'Are you a driver? Open /driver'),
-                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: _openDriverPage,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white54),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                        icon: const Icon(Icons.local_shipping, size: 18),
+                        label: Text(tr('سائق؟ افتح بوابة السائق',
+                            'Are you a driver? Open the driver portal')),
                       ),
                     ],
                   ),
