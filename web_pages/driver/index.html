@@ -87,12 +87,24 @@ function authView(mode='login') {
       ` : ''}
       <label>Username</label><input id="username" autocomplete="username"/>
       <label>Password</label><input id="password" type="password" autocomplete="current-password"/>
+      ${mode==='signup' ? `<label>Confirm password</label><input id="password2" type="password"/>` : ''}
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:#475569">
+        <input type="checkbox" onchange="togglePw(this.checked)" style="width:auto"/> Show password
+      </label>
       <button class="btn-primary" onclick="doAuth('${mode}')">${mode==='signup'?'Create driver account':'Log in'}</button>
       <div class="err" id="err"></div>
     </div>`;
 }
 
+function togglePw(show){
+  document.querySelectorAll('#password,#password2').forEach(i=>{ i.type = show ? 'text' : 'password'; });
+}
 function doAuth(mode) {
+  if (mode==='signup') {
+    const p2 = el('password2');
+    if (el('password').value.length < 4) return el('err').textContent='Password must be at least 4 characters.';
+    if (p2 && el('password').value !== p2.value) return el('err').textContent='Passwords do not match.';
+  }
   const body = {
     username: el('username').value.trim(),
     password: el('password').value,

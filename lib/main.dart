@@ -541,10 +541,13 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _signup = false;
   bool _busy = false;
   String? _error;
+  bool _showPassword = false;
+  bool _showConfirm = false;
   final _name = TextEditingController();
   final _phone = TextEditingController();
   final _username = TextEditingController();
   final _password = TextEditingController();
+  final _confirm = TextEditingController();
 
   @override
   void dispose() {
@@ -552,6 +555,7 @@ class _AuthScreenState extends State<AuthScreen> {
     _phone.dispose();
     _username.dispose();
     _password.dispose();
+    _confirm.dispose();
     super.dispose();
   }
 
@@ -570,6 +574,13 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       if (_signup) {
         if (_name.text.trim().length < 2) throw Exception(tr('أدخل اسمك', 'Enter your name'));
+        if (_password.text.length < 4) {
+          throw Exception(tr('كلمة المرور 4 أحرف على الأقل',
+              'Password must be at least 4 characters'));
+        }
+        if (_password.text != _confirm.text) {
+          throw Exception(tr('كلمتا المرور غير متطابقتين', 'Passwords do not match'));
+        }
         await Api.signup(
           name: _name.text.trim(),
           username: _username.text.trim(),
@@ -641,9 +652,21 @@ class _AuthScreenState extends State<AuthScreen> {
                             _field(_username, tr('اسم المستخدم', 'Username'),
                                 Icons.alternate_email),
                             const SizedBox(height: 12),
-                            _field(_password, tr('كلمة المرور', 'Password'),
-                                Icons.lock,
-                                obscure: true),
+                            _passwordField(
+                              _password,
+                              tr('كلمة المرور', 'Password'),
+                              _showPassword,
+                              () => setState(() => _showPassword = !_showPassword),
+                            ),
+                            if (_signup) ...[
+                              const SizedBox(height: 12),
+                              _passwordField(
+                                _confirm,
+                                tr('تأكيد كلمة المرور', 'Confirm password'),
+                                _showConfirm,
+                                () => setState(() => _showConfirm = !_showConfirm),
+                              ),
+                            ],
                             if (_error != null) ...[
                               const SizedBox(height: 10),
                               Text(_error!,
@@ -720,6 +743,25 @@ class _AuthScreenState extends State<AuthScreen> {
       decoration: InputDecoration(
         hintText: hint,
         prefixIcon: Icon(icon),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  Widget _passwordField(
+      TextEditingController c, String hint, bool show, VoidCallback toggle) {
+    return TextField(
+      controller: c,
+      obscureText: !show,
+      decoration: InputDecoration(
+        hintText: hint,
+        prefixIcon: const Icon(Icons.lock),
+        suffixIcon: IconButton(
+          icon: Icon(show ? Icons.visibility_off : Icons.visibility,
+              color: Colors.black45),
+          tooltip: show ? tr('إخفاء', 'Hide') : tr('إظهار', 'Show'),
+          onPressed: toggle,
+        ),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
